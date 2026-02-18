@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { authMiddleware, requireRole, requireStateScope, type AuthenticatedRequest } from '../middleware/auth'
 import { Order } from '../models/Order'
+import { Hub } from '../models/Hub'
 import { Route } from '../models/Route'
 import { RouteStop } from '../models/RouteStop'
 import { Driver } from '../models/Driver'
@@ -55,6 +56,12 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
               addressCity: order.addressCity,
               addressState: order.addressState,
               addressZip: order.addressZip,
+              originHubId: order.originHubId ? String(order.originHubId) : null,
+              sku: order.sku ?? null,
+              itemName: order.itemName ?? null,
+              image: order.image ?? null,
+              description: order.description ?? null,
+              quantityUnits: order.quantityUnits ?? null,
               routeId: String(r._id),
               routeStatus: r.status,
               stopSequence: s.sequence,
@@ -66,7 +73,7 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
             })
           }
         }
-        const pendingOrders = await Order.find({ stateId, status: 'pending' }).lean()
+        const pendingOrders = await Order.find({ stateId, status: { $in: ['pending', 'pending_pickup'] } }).lean()
         for (const o of pendingOrders) {
           rows.push({
             orderId: String(o._id),
@@ -77,6 +84,12 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
             addressCity: o.addressCity,
             addressState: o.addressState,
             addressZip: o.addressZip,
+            originHubId: o.originHubId ? String(o.originHubId) : null,
+            sku: o.sku ?? null,
+            itemName: o.itemName ?? null,
+            image: o.image ?? null,
+            description: o.description ?? null,
+            quantityUnits: o.quantityUnits ?? null,
             routeId: null,
             routeStatus: null,
             stopSequence: null,
@@ -86,6 +99,16 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
             assignedAt: null,
             completedAt: null,
           })
+        }
+        const allOrders = [...orders, ...pendingOrders]
+        const originHubIds = [...new Set(allOrders.map((o: any) => o.originHubId).filter(Boolean))]
+        const hubMap = new Map<string, string>()
+        if (originHubIds.length > 0) {
+          const hubs = await Hub.find({ _id: { $in: originHubIds } }).select('name').lean()
+          for (const h of hubs) hubMap.set(String((h as any)._id), (h as any).name)
+        }
+        for (const row of rows) {
+          row.originHubName = row.originHubId ? hubMap.get(row.originHubId) ?? null : null
         }
         return reply.send(rows)
       }

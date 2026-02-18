@@ -15,16 +15,36 @@ const NJ_ZIP_CENTROIDS = [
   { zip: '08901', lat: 40.48, lon: -74.45 },
 ]
 
+// All US states + DC for Service areas dropdown and other config
+const US_STATES = [
+  { code: 'AL', name: 'Alabama' }, { code: 'AK', name: 'Alaska' }, { code: 'AZ', name: 'Arizona' }, { code: 'AR', name: 'Arkansas' },
+  { code: 'CA', name: 'California' }, { code: 'CO', name: 'Colorado' }, { code: 'CT', name: 'Connecticut' }, { code: 'DE', name: 'Delaware' },
+  { code: 'DC', name: 'District of Columbia' }, { code: 'FL', name: 'Florida' }, { code: 'GA', name: 'Georgia' }, { code: 'HI', name: 'Hawaii' },
+  { code: 'ID', name: 'Idaho' }, { code: 'IL', name: 'Illinois' }, { code: 'IN', name: 'Indiana' }, { code: 'IA', name: 'Iowa' },
+  { code: 'KS', name: 'Kansas' }, { code: 'KY', name: 'Kentucky' }, { code: 'LA', name: 'Louisiana' }, { code: 'ME', name: 'Maine' },
+  { code: 'MD', name: 'Maryland' }, { code: 'MA', name: 'Massachusetts' }, { code: 'MI', name: 'Michigan' }, { code: 'MN', name: 'Minnesota' },
+  { code: 'MS', name: 'Mississippi' }, { code: 'MO', name: 'Missouri' }, { code: 'MT', name: 'Montana' }, { code: 'NE', name: 'Nebraska' },
+  { code: 'NV', name: 'Nevada' }, { code: 'NH', name: 'New Hampshire' }, { code: 'NJ', name: 'New Jersey' }, { code: 'NM', name: 'New Mexico' },
+  { code: 'NY', name: 'New York' }, { code: 'NC', name: 'North Carolina' }, { code: 'ND', name: 'North Dakota' }, { code: 'OH', name: 'Ohio' },
+  { code: 'OK', name: 'Oklahoma' }, { code: 'OR', name: 'Oregon' }, { code: 'PA', name: 'Pennsylvania' }, { code: 'RI', name: 'Rhode Island' },
+  { code: 'SC', name: 'South Carolina' }, { code: 'SD', name: 'South Dakota' }, { code: 'TN', name: 'Tennessee' }, { code: 'TX', name: 'Texas' },
+  { code: 'UT', name: 'Utah' }, { code: 'VT', name: 'Vermont' }, { code: 'VA', name: 'Virginia' }, { code: 'WA', name: 'Washington' },
+  { code: 'WV', name: 'West Virginia' }, { code: 'WI', name: 'Wisconsin' }, { code: 'WY', name: 'Wyoming' },
+]
+
 async function seed(): Promise<void> {
   await connectDB()
   for (const c of NJ_ZIP_CENTROIDS) {
     await ZipCentroid.findOneAndUpdate({ zip: c.zip }, c, { upsert: true })
   }
-  await State.findOneAndUpdate(
-    { code: 'NJ' },
-    { code: 'NJ', name: 'New Jersey', timezone: 'America/New_York' },
-    { upsert: true }
-  )
+  for (const s of US_STATES) {
+    await State.findOneAndUpdate(
+      { code: s.code },
+      { code: s.code, name: s.name, timezone: 'America/New_York' },
+      { upsert: true }
+    )
+  }
+  console.log(`Upserted ${US_STATES.length} states (all US + DC).`)
   const hashAdmin = await bcrypt.hash('admin123', 10)
   const existingAdmin = await User.findOne({ email: 'admin@uniecourier.com' })
   if (!existingAdmin) {

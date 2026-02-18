@@ -1,0 +1,321 @@
+import mongoose from 'mongoose'
+import { FastifyInstance } from 'fastify'
+import { authMiddleware, requireRole, requireStateScope, type AuthenticatedRequest } from '../middleware/auth'
+import { Order } from '../models/Order'
+import { Hub } from '../models/Hub'
+import { Warehouse } from '../models/Warehouse'
+import { createOrder } from '../repos/orders.repo'
+import { resolveStateFromZip, calculateRate } from '../services/rate-shop.service'
+import { ORDER_STATUSES } from '../models/Order'
+
+export async function registerShipmentsRoutes(app: FastifyInstance): Promise<void> {
+  app.register(async (instance) => {
+    instance.addHook('preHandler', authMiddleware)
+    instance.addHook('preHandler', requireRole('admin', 'manager', 'dispatcher', 'warehouse'))
+
+    // Get origin options (state + hubs) for a destination ZIP so user can pick origin hub
+    instance.get<{ Querystring: { zip: string } }>(
+      '/api/v1/shipments/origin-options',
+      async (request: AuthenticatedRequest, reply) => {
+        const zip = String((request.query as { zip?: string }).zip || '').replace(/\D/g, '').slice(0, 5)
+        if (zip.length < 3) return reply.code(400).send({ error: 'Valid ZIP required' })
+        const resolved = await resolveStateFromZip(zip)
+        if ('noService' in resolved && resolved.noService) {
+          return reply.code(400).send({ error: resolved.error ?? 'We do not deliver to this ZIP.' })
+        }
+        const stateId = (resolved as { stateId: string }).stateId
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== stateId) {
+          return reply.code(403).send({ error: 'State not in scope' })
+        }
+        const hubs = await Hub.find({ stateId, active: true }).select('name addressLine1 addressCity addressState addressZip').sort({ name: 1 }).lean()
+        return reply.send({
+          stateId,
+          stateCode: (resolved as { stateCode: string }).stateCode,
+          stateName: (resolved as { stateName: string }).stateName,
+          hubs: hubs.map((h: any) => ({ id: String(h._id), name: h.name, address: [h.addressLine1, h.addressCity, h.addressState, h.addressZip].filter(Boolean).join(', ') })),
+        })
+      }
+    )
+
+    // Create shipment manually: state derived from destination ZIP; origin hub and bill-to required
+    instance.post<{
+      Body: {
+        originHubId: string
+        addressLine1: string
+        addressCity: string
+        addressState: string
+        addressZip: string
+        addressName?: string
+        addressCompany?: string
+        addressLine2?: string
+        weightLbs: number
+        lengthIn?: number
+        widthIn?: number
+        heightIn?: number
+        itemType?: string
+        billingName: string
+        billingCompany?: string
+        billingEmail?: string
+        billingPhone?: string
+        sku?: string
+        itemName?: string
+        image?: string
+        description?: string
+        quantityUnits?: number
+      }
+    }>('/api/v1/shipments', async (request: AuthenticatedRequest, reply) => {
+      const body = request.body as any
+      if (!body?.addressLine1?.trim() || !body?.addressCity?.trim() || !body?.addressState?.trim() || !body?.addressZip?.trim() || body?.weightLbs == null) {
+        return reply.code(400).send({ error: 'addressLine1, addressCity, addressState, addressZip, and weightLbs required' })
+      }
+      if (!body?.billingName?.trim()) {
+        return reply.code(400).send({ error: 'Bill-to name (billingName) is required' })
+      }
+      if (!body?.originHubId?.trim()) {
+        return reply.code(400).send({ error: 'Origin hub (originHubId) is required' })
+      }
+      const zipCode = String(body.addressZip).trim().replace(/\D/g, '').slice(0, 5)
+      if (zipCode.length < 3) return reply.code(400).send({ error: 'Invalid addressZip' })
+
+      // State is derived only from destination ZIP
+      const resolved = await resolveStateFromZip(zipCode)
+      if ('noService' in resolved && resolved.noService) {
+        return reply.code(400).send({ error: resolved.error ?? 'We do not deliver to this ZIP/state.' })
+      }
+      const stateId = (resolved as { stateId: string }).stateId
+      const scope = requireStateScope(request)
+      if (request.role !== 'admin' && scope !== stateId) {
+        return reply.code(403).send({ error: 'State not in scope' })
+      }
+
+      const originInput = String(body.originHubId).trim()
+      let originHubId: string
+      let warehouseId: string | undefined
+
+      if (originInput.startsWith('warehouse:')) {
+        const warehouseMongoId = originInput.slice('warehouse:'.length)
+        const warehouse = await Warehouse.findOne({ _id: new mongoose.Types.ObjectId(warehouseMongoId), stateId }).lean()
+        if (!warehouse) return reply.code(400).send({ error: 'Origin warehouse not found' })
+        const firstHub = await Hub.findOne({ stateId, active: true }).sort({ name: 1 }).select('_id').lean()
+        if (!firstHub) return reply.code(400).send({ error: 'No hub configured for this state; add a hub first' })
+        originHubId = String((firstHub as any)._id)
+        warehouseId = warehouseMongoId
+      } else if (originInput.startsWith('primary:')) {
+        const firstHub = await Hub.findOne({ stateId, active: true }).sort({ name: 1 }).select('_id').lean()
+        if (!firstHub) return reply.code(400).send({ error: 'No hub configured for this state; add a hub first' })
+        originHubId = String((firstHub as any)._id)
+      } else {
+        const hub = await Hub.findOne({ _id: originInput, stateId, active: true }).lean()
+        if (!hub) return reply.code(400).send({ error: 'Origin hub not found or not in this state' })
+        originHubId = originInput
+      }
+
+      const itemType = (body.itemType || 'parcel').toLowerCase()
+      if (!['parcel', 'freight', 'bulk', 'hazmat'].includes(itemType)) {
+        return reply.code(400).send({ error: 'itemType must be parcel, freight, bulk, or hazmat' })
+      }
+
+      const rateResult = await calculateRate({
+        stateId,
+        zipCode,
+        weightLbs: Number(body.weightLbs) || 0,
+        lengthIn: body.lengthIn != null ? Number(body.lengthIn) : undefined,
+        widthIn: body.widthIn != null ? Number(body.widthIn) : undefined,
+        heightIn: body.heightIn != null ? Number(body.heightIn) : undefined,
+        itemType,
+      })
+      if (rateResult.noService || (rateResult.error && rateResult.error.includes('do not deliver'))) {
+        return reply.code(400).send({ error: rateResult.error ?? 'Cannot create shipment for this destination.' })
+      }
+
+      const orderId = await createOrder({
+        stateId,
+        originHubId,
+        warehouseId: warehouseId,
+        addressLine1: String(body.addressLine1).trim(),
+        addressCity: String(body.addressCity).trim(),
+        addressState: String(body.addressState).trim(),
+        addressZip: zipCode.padStart(5, '0'),
+        addressName: body.addressName?.trim(),
+        addressCompany: body.addressCompany?.trim(),
+        addressLine2: body.addressLine2?.trim(),
+        addressCountry: 'US',
+        itemType,
+        weightLbs: Number(body.weightLbs) || 0,
+        lengthIn: body.lengthIn != null ? Number(body.lengthIn) : undefined,
+        widthIn: body.widthIn != null ? Number(body.widthIn) : undefined,
+        heightIn: body.heightIn != null ? Number(body.heightIn) : undefined,
+        rateTotalCents: rateResult.totalCents,
+        billingName: String(body.billingName).trim(),
+        billingCompany: body.billingCompany?.trim(),
+        billingEmail: body.billingEmail?.trim(),
+        billingPhone: body.billingPhone?.trim(),
+        status: 'pending_pickup',
+        sku: body.sku?.trim() || undefined,
+        itemName: body.itemName?.trim() || undefined,
+        image: body.image?.trim() || undefined,
+        description: body.description?.trim() || undefined,
+        quantityUnits: body.quantityUnits != null ? Number(body.quantityUnits) : undefined,
+      })
+      return reply.send({
+        orderId,
+        totalDollars: rateResult.totalDollars,
+        rateTotalCents: rateResult.totalCents,
+        stateId,
+        stateCode: rateResult.stateCode,
+        stateName: rateResult.stateName,
+      })
+    })
+
+    // Get single shipment/order
+    instance.get<{ Params: { id: string } }>(
+      '/api/v1/shipments/:id',
+      async (request: AuthenticatedRequest, reply) => {
+        const id = (request.params as { id: string }).id
+        const doc = await Order.findById(id).lean()
+        if (!doc) return reply.code(404).send({ error: 'Shipment not found' })
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== String(doc.stateId)) {
+          return reply.code(403).send({ error: 'Shipment not in scope' })
+        }
+        let originHub: { id: string; name: string; address: string } | null = null
+        if (doc.originHubId) {
+          const h = await Hub.findById(doc.originHubId).select('name addressLine1 addressCity addressState addressZip').lean()
+          if (h) {
+            const ha = (h as any)
+            originHub = {
+              id: String(ha._id),
+              name: ha.name,
+              address: [ha.addressLine1, ha.addressCity, ha.addressState, ha.addressZip].filter(Boolean).join(', '),
+            }
+          }
+        }
+        return reply.send({
+          id: String(doc._id),
+          stateId: String(doc.stateId),
+          originHubId: doc.originHubId ? String(doc.originHubId) : null,
+          originHub,
+          status: doc.status,
+          addressLine1: doc.addressLine1,
+          addressLine2: doc.addressLine2,
+          addressCity: doc.addressCity,
+          addressState: doc.addressState,
+          addressZip: doc.addressZip,
+          addressName: doc.addressName,
+          addressCompany: doc.addressCompany,
+          weightLbs: doc.weightLbs,
+          lengthIn: doc.lengthIn,
+          widthIn: doc.widthIn,
+          heightIn: doc.heightIn,
+          itemType: doc.itemType,
+          rateTotalCents: doc.rateTotalCents,
+          billingName: doc.billingName,
+          billingCompany: doc.billingCompany,
+          billingEmail: doc.billingEmail,
+          billingPhone: doc.billingPhone,
+          sku: doc.sku ?? null,
+          itemName: doc.itemName ?? null,
+          image: doc.image ?? null,
+          description: doc.description ?? null,
+          quantityUnits: doc.quantityUnits ?? null,
+          createdAt: doc.createdAt,
+          updatedAt: doc.updatedAt,
+        })
+      }
+    )
+
+    // 4x6 shipping label (HTML for print)
+    instance.get<{ Params: { id: string } }>(
+      '/api/v1/shipments/:id/label',
+      async (request: AuthenticatedRequest, reply) => {
+        const id = (request.params as { id: string }).id
+        const doc = await Order.findById(id).lean()
+        if (!doc) return reply.code(404).send({ error: 'Shipment not found' })
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== String(doc.stateId)) {
+          return reply.code(403).send({ error: 'Shipment not in scope' })
+        }
+        let fromBlock = ''
+        if (doc.originHubId) {
+          const hub = await Hub.findById(doc.originHubId).select('name addressLine1 addressLine2 addressCity addressState addressZip').lean()
+          if (hub) {
+            const h = hub as any
+            const fromAddr = [h.addressLine1, h.addressLine2, [h.addressCity, h.addressState].filter(Boolean).join(', '), h.addressZip].filter(Boolean).join('\n')
+            fromBlock = `<div class="from" style="margin-bottom: 10px;"><div class="to">FROM:</div><div class="addr">${escapeHtml(h.name)}</div><div class="addr">${escapeHtml(fromAddr)}</div></div>`
+          }
+        }
+        const toName = [doc.addressName, doc.addressCompany].filter(Boolean).join(' / ') || 'Recipient'
+        const toAddr = [
+          doc.addressLine1,
+          doc.addressLine2,
+          [doc.addressCity, doc.addressState].filter(Boolean).join(', '),
+          doc.addressZip,
+        ].filter(Boolean).join('\n')
+        const orderShortId = String(doc._id).slice(-8).toUpperCase()
+        let itemBlock = ''
+        if (doc.itemName || doc.sku || doc.image || doc.description || doc.quantityUnits != null) {
+          const parts: string[] = []
+          if (doc.itemName) parts.push(escapeHtml(doc.itemName))
+          if (doc.sku) parts.push(`SKU: ${escapeHtml(doc.sku)}`)
+          if (doc.quantityUnits != null) parts.push(`Qty: ${doc.quantityUnits}`)
+          if (doc.description) parts.push(escapeHtml(doc.description))
+          const imgTag = doc.image ? `<img src="${escapeHtml(doc.image)}" alt="" style="max-width: 1.2in; max-height: 1in; object-fit: contain; margin-top: 4px;" />` : ''
+          itemBlock = `<div class="tracking" style="margin-bottom: 8px;">${parts.join(' · ')}${imgTag ? `<br/>${imgTag}` : ''}</div>`
+        }
+        const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Label ${orderShortId}</title>
+<style>
+  @page { size: 4in 6in; margin: 0.25in; }
+  body { font-family: Arial, sans-serif; font-size: 12px; margin: 0; padding: 0.25in; box-sizing: border-box; width: 4in; min-height: 6in; }
+  .to { font-weight: bold; margin-bottom: 4px; }
+  .addr { white-space: pre-line; line-height: 1.3; }
+  .tracking { margin-top: 12px; font-size: 10px; color: #666; }
+  .id { font-family: monospace; font-size: 14px; letter-spacing: 1px; }
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style></head>
+<body>
+  ${fromBlock}
+  ${itemBlock}
+  <div class="to">TO:</div>
+  <div class="addr">${escapeHtml(toName)}</div>
+  <div class="addr">${escapeHtml(toAddr)}</div>
+  <div class="tracking">Order ID: <span class="id">${escapeHtml(orderShortId)}</span></div>
+  ${doc.weightLbs != null ? `<div class="tracking">Weight: ${escapeHtml(String(doc.weightLbs))} lbs</div>` : ''}
+</body></html>`
+        reply.header('Content-Type', 'text/html; charset=utf-8')
+        return reply.send(html)
+      }
+    )
+
+    // Update shipment status
+    instance.patch<{ Params: { id: string }; Body: { status: string } }>(
+      '/api/v1/shipments/:id/status',
+      async (request: AuthenticatedRequest, reply) => {
+        const id = (request.params as { id: string }).id
+        const body = request.body as any
+        const status = body?.status ? String(body.status).trim() : ''
+        if (!ORDER_STATUSES.includes(status as any)) {
+          return reply.code(400).send({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` })
+        }
+        const doc = await Order.findById(id)
+        if (!doc) return reply.code(404).send({ error: 'Shipment not found' })
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== String(doc.stateId)) {
+          return reply.code(403).send({ error: 'Shipment not in scope' })
+        }
+        doc.status = status
+        await doc.save()
+        return reply.send({ id, status: doc.status })
+      }
+    )
+  })
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}

@@ -11,4 +11,5 @@ const ServiceAreaZipSchema = new Schema(
 
 ServiceAreaZipSchema.index({ stateId: 1, zipCode: 1 }, { unique: true })
 ServiceAreaZipSchema.index({ stateId: 1 })
+ServiceAreaZipSchema.index({ zipCode: 1 }) // for rate-shop: resolve state from ZIP
 export const ServiceAreaZip = mongoose.model('ServiceAreaZip', ServiceAreaZipSchema)

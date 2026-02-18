@@ -1,12 +1,16 @@
 import mongoose, { Schema } from 'mongoose'
 
+/** Order/shipment status. pending_pickup = awaiting pickup; in_route = with driver; delivered; on_hold. */
+export const ORDER_STATUSES = ['pending_pickup', 'pending', 'in_route', 'delivered', 'on_hold'] as const
+
 const OrderSchema = new Schema(
   {
     stateId: { type: Schema.Types.ObjectId, ref: 'State', required: true },
+    originHubId: { type: Schema.Types.ObjectId, ref: 'Hub' },
     warehouseId: { type: Schema.Types.ObjectId, ref: 'Warehouse' },
     externalOrderId: String,
     externalShipmentId: String,
-    status: { type: String, required: true, default: 'pending' },
+    status: { type: String, required: true, default: 'pending_pickup' },
     addressName: String,
     addressCompany: String,
     addressLine1: { type: String, required: true },
@@ -17,6 +21,24 @@ const OrderSchema = new Schema(
     addressCountry: { type: String, default: 'US' },
     deadlineAt: Date,
     itemType: { type: String, default: 'parcel' },
+    // WMS / API integration: product and line info (from kiosk/API)
+    sku: String,
+    itemName: String,   // item title
+    image: String,      // URL or data URL to product image
+    description: String,
+    quantityUnits: Number, // number of units
+    // Weight/dimensions for rate and label
+    weightLbs: Number,
+    lengthIn: Number,
+    widthIn: Number,
+    heightIn: Number,
+    // Rate (from rate-shop logic at creation)
+    rateTotalCents: Number,
+    // Billing / customer details
+    billingName: String,
+    billingCompany: String,
+    billingEmail: String,
+    billingPhone: String,
   },
   { timestamps: true, collection: 'orders' }
 )

@@ -23,6 +23,8 @@ import { registerIssuesRoutes } from './routes/issues.routes'
 import { registerShipmentsBoardRoutes } from './routes/shipments-board.routes'
 import { registerUsersRoutes } from './routes/users.routes'
 import { registerProfileRoutes } from './routes/profile.routes'
+import { registerRateShopRoutes } from './routes/rate-shop.routes'
+import { registerShipmentsRoutes } from './routes/shipments.routes'
 
 dotenv.config()
 
@@ -73,6 +75,8 @@ async function start(): Promise<void> {
   await registerShipmentsBoardRoutes(app)
   await registerUsersRoutes(app)
   await registerProfileRoutes(app)
+  await registerRateShopRoutes(app)
+  await registerShipmentsRoutes(app)
 
   app.get('/health', async (_, reply) => {
     return reply.send({ ok: true, service: 'uniecourier-api' })
