@@ -100,7 +100,8 @@ export async function listDriversByState(
   stateId: string,
   activeOnly = true
 ): Promise<DriverRow[]> {
-  const q: any = { stateId }
+  const q: any = {}
+  if (stateId && stateId !== 'all') q.stateId = stateId
   if (activeOnly) q.active = true
   const docs = await Driver.find(q).sort({ name: 1 }).lean()
   return docs.map((d: any) => ({

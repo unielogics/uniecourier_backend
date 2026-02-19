@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { authMiddleware, requireRole, requireStateScope, type AuthenticatedRequest } from '../middleware/auth'
-import { getNationalSummary, getStateMetrics, getMapData } from '../repos/dashboard.repo'
+import { getNationalSummary, getStateMetrics, getMapData, getDispatchSummary } from '../repos/dashboard.repo'
+import { listStates } from '../repos/states.repo'
 import { Warehouse } from '../models/Warehouse'
 import { Hub } from '../models/Hub'
 import { PrimaryLocation } from '../models/PrimaryLocation'
@@ -39,16 +40,58 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
     })
 
     instance.get<{ Querystring: { stateId?: string } }>(
+      '/api/v1/dashboard/dispatch-summary',
+      async (request: AuthenticatedRequest, reply) => {
+        const q = request.query as { stateId?: string }
+        const h = request.headers['x-state-id']
+        let stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h) ?? request.stateId
+        const scope = requireStateScope(request)
+        if (stateIdRaw === 'all') {
+          if (request.role !== 'admin' && scope) stateIdRaw = scope
+          else if (request.role !== 'admin') return reply.code(403).send({ error: 'All states requires admin role' })
+        }
+        const stateId = typeof stateIdRaw === 'string' ? stateIdRaw : null
+        if (!stateId) return reply.code(400).send({ error: 'stateId required' })
+        if (request.role !== 'admin' && scope !== stateId) return reply.code(403).send({ error: 'State not in scope' })
+        const summary = await getDispatchSummary(stateId)
+        return reply.send(summary)
+      }
+    )
+
+    instance.get<{ Querystring: { stateId?: string } }>(
       '/api/v1/dashboard/state-metrics',
       async (request: AuthenticatedRequest, reply) => {
         const q = request.query as { stateId?: string }
         const h = request.headers['x-state-id']
-        const stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h) ?? request.stateId
+        let stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h) ?? request.stateId
+        const scope = requireStateScope(request)
+        if (stateIdRaw === 'all') {
+          if (request.role !== 'admin' && scope) stateIdRaw = scope
+          else if (request.role !== 'admin') return reply.code(403).send({ error: 'All states requires admin role' })
+        }
         const stateId = typeof stateIdRaw === 'string' ? stateIdRaw : null
         if (!stateId) return reply.code(400).send({ error: 'stateId required' })
-        const scope = requireStateScope(request)
         if (request.role !== 'admin' && scope !== stateId) {
           return reply.code(403).send({ error: 'State not in scope' })
+        }
+        if (stateId === 'all') {
+          const states = await listStates()
+          const allMetrics = await Promise.all(states.map((s) => getStateMetrics(s.id)))
+          const aggregated = allMetrics.reduce(
+            (acc, m) => ({
+              available: (acc.available ?? 0) + (m.available ?? 0),
+              assigned: (acc.assigned ?? 0) + (m.assigned ?? 0),
+              inProgress: (acc.inProgress ?? 0) + (m.inProgress ?? 0),
+              completedToday: (acc.completedToday ?? 0) + (m.completedToday ?? 0),
+              failedStops: (acc.failedStops ?? 0) + (m.failedStops ?? 0),
+              avgStopsPerRoute: acc.avgStopsPerRoute ?? 0,
+              avgMilesPerRoute: acc.avgMilesPerRoute ?? 0,
+              costPerStop: acc.costPerStop ?? 0,
+              driverAcceptanceRate: acc.driverAcceptanceRate ?? 0,
+            }),
+            {} as Record<string, number>
+          )
+          return reply.send(aggregated)
         }
         const metrics = await getStateMetrics(stateId)
         return reply.send(metrics)

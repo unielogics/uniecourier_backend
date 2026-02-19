@@ -42,10 +42,14 @@ export async function registerJobsRoutes(app: FastifyInstance): Promise<void> {
     async (request: AuthenticatedRequest, reply) => {
       const q = request.query as { stateId?: string }
       const h = request.headers['x-state-id']
-      const stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h)
+      let stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h)
+      const scope = requireStateScope(request)
+      if (stateIdRaw === 'all') {
+        if (request.role !== 'admin' && scope) stateIdRaw = scope
+        else if (request.role !== 'admin') return reply.code(403).send({ error: 'All states requires admin role' })
+      }
       const stateId = typeof stateIdRaw === 'string' ? stateIdRaw : null
       if (!stateId) return reply.code(400).send({ error: 'stateId required' })
-      const scope = requireStateScope(request)
       if (request.role !== 'admin' && scope !== stateId) {
         return reply.code(403).send({ error: 'State not in scope' })
       }

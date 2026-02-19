@@ -125,7 +125,8 @@ export async function listRoutesByState(
   stateId: string,
   status?: RouteStatus
 ): Promise<RouteRow[]> {
-  const q: any = { stateId }
+  const q: any = {}
+  if (stateId && stateId !== 'all') q.stateId = stateId
   if (status) q.status = status
   const docs = await Route.find(q).sort({ createdAt: -1 }).lean()
   return docs.map(toRouteRow)

@@ -19,6 +19,9 @@ export interface OrderRow {
 export async function createOrder(data: {
   stateId: string
   originHubId?: string
+  originWarehouseCode?: string
+  originWarehouseName?: string
+  originWarehouseAddress?: string
   warehouseId?: string
   externalOrderId?: string
   externalShipmentId?: string
@@ -51,6 +54,9 @@ export async function createOrder(data: {
   const doc = await Order.create({
     stateId: data.stateId,
     originHubId: data.originHubId,
+    originWarehouseCode: data.originWarehouseCode,
+    originWarehouseName: data.originWarehouseName,
+    originWarehouseAddress: data.originWarehouseAddress,
     warehouseId: data.warehouseId,
     externalOrderId: data.externalOrderId,
     externalShipmentId: data.externalShipmentId,

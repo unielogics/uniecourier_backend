@@ -7,6 +7,10 @@ const OrderSchema = new Schema(
   {
     stateId: { type: Schema.Types.ObjectId, ref: 'State', required: true },
     originHubId: { type: Schema.Types.ObjectId, ref: 'Hub' },
+    /** Origin warehouse from WMS (WH-XXX + address). Used for label/ship-from when set. */
+    originWarehouseCode: String,
+    originWarehouseName: String,
+    originWarehouseAddress: String,
     warehouseId: { type: Schema.Types.ObjectId, ref: 'Warehouse' },
     externalOrderId: String,
     externalShipmentId: String,

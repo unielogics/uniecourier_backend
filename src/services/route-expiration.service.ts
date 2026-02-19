@@ -36,10 +36,9 @@ export async function getExpirationAlertsForState(stateId: string): Promise<
     acknowledgedAt: string | null
   }[]
 > {
-  const docs = await RouteExpirationAlert.find({
-    stateId,
-    acknowledgedAt: null,
-  })
+  const match: any = { acknowledgedAt: null }
+  if (stateId && stateId !== 'all') match.stateId = stateId
+  const docs = await RouteExpirationAlert.find(match)
     .sort({ alertedAt: -1 })
     .lean()
   return docs.map((d) => ({

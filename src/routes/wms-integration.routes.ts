@@ -3,6 +3,7 @@ import { createOrder } from '../repos/orders.repo'
 import { findStateByCode } from '../repos/states.repo'
 import { Hub } from '../models/Hub'
 import { Order } from '../models/Order'
+import { Warehouse } from '../models/Warehouse'
 import { calculateRate } from '../services/rate-shop.service'
 
 const WMS_WEBHOOK_SECRET = process.env.WMS_WEBHOOK_SECRET || ''
@@ -58,10 +59,16 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
       image?: string
       description?: string
       quantityUnits?: number
-      /** Ship-from: warehouse location for mapping to origin hub */
+      /** Ship-from: warehouse location for mapping to origin hub. Include warehouseCode + name + address for Origin Hub display. */
       shipFrom?: {
         originHubId?: string
         warehouseCode?: string
+        name?: string
+        addressLine1?: string
+        addressLine2?: string
+        city?: string
+        state?: string
+        zip?: string
       }
       /** Bill-to (intermediary details) — maps to billing on order */
       billTo: {
@@ -70,6 +77,8 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
         email?: string
         phone?: string
       }
+      /** Agreed rate in cents (from Kiosk rate-shopping). When provided, used instead of recalculating. */
+      rateTotalCents?: number
       deadlineAt?: string
     }
     Headers: { 'x-wms-webhook-secret'?: string }
@@ -111,29 +120,65 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
         return reply.code(400).send({ error: 'shipFrom.originHubId not found or not active in this state' })
       }
       originHubId = String((hub as any)._id)
-    } else {
-      // Default: first active hub in state (or could later map shipFrom.warehouseCode to a hub)
+    } else if (body.shipFrom?.warehouseCode?.trim() || body.shipFrom?.state?.trim()) {
+      // Map warehouseCode to origin hub: find warehouse by code in UnieCourier DB, then first active hub in that state.
+      // If warehouse not in UnieCourier (e.g. WMS-only), use shipFrom.state (origin/warehouse state) to pick a hub.
+      const warehouse = body.shipFrom?.warehouseCode?.trim()
+        ? await Warehouse.findOne({ code: body.shipFrom.warehouseCode.trim() }).lean()
+        : null
+      let hubStateId: string | undefined
+      if (warehouse) {
+        hubStateId = String((warehouse as any).stateId)
+      } else if (body.shipFrom?.state?.trim()) {
+        const originState = await findStateByCode(body.shipFrom.state.trim())
+        if (originState) hubStateId = originState.id
+      }
+      if (!hubStateId) hubStateId = stateId
+      const hub = await Hub.findOne({ stateId: hubStateId, active: true }).sort({ name: 1 }).select('_id').lean()
+      if (hub) originHubId = String((hub as any)._id)
+    }
+    if (!originHubId) {
+      // Fallback: first active hub in destination state
       const hub = await Hub.findOne({ stateId, active: true }).sort({ name: 1 }).select('_id').lean()
       if (hub) originHubId = String((hub as any)._id)
     }
 
-    const rateResult = await calculateRate({
-      stateId,
-      zipCode,
-      weightLbs: Number(body.weightLbs) || 0,
-      lengthIn: body.lengthIn != null ? Number(body.lengthIn) : undefined,
-      widthIn: body.widthIn != null ? Number(body.widthIn) : undefined,
-      heightIn: body.heightIn != null ? Number(body.heightIn) : undefined,
-      itemType,
-    })
-    if (rateResult.error && rateResult.error.includes('do not deliver')) {
-      return reply.code(400).send({ error: rateResult.error })
+    const sf = body.shipFrom
+    const originWarehouseCode = sf?.warehouseCode?.trim() || undefined
+    const originWarehouseName = sf?.name?.trim() || undefined
+    let originWarehouseAddress: string | undefined
+    if (sf?.addressLine1 || sf?.city) {
+      const parts: string[] = [sf.addressLine1?.trim(), sf.addressLine2?.trim()].filter(Boolean)
+      const csz = [sf.city, sf.state, sf.zip].filter(Boolean).join(', ').trim()
+      if (csz) parts.push(csz)
+      originWarehouseAddress = parts.join('\n')
     }
-    const rateTotalCents = rateResult.totalCents ?? 0
+
+    let rateTotalCents: number
+    if (body.rateTotalCents != null && Number.isFinite(Number(body.rateTotalCents)) && Number(body.rateTotalCents) > 0) {
+      rateTotalCents = Math.round(Number(body.rateTotalCents))
+    } else {
+      const rateResult = await calculateRate({
+        stateId,
+        zipCode,
+        weightLbs: Number(body.weightLbs) || 0,
+        lengthIn: body.lengthIn != null ? Number(body.lengthIn) : undefined,
+        widthIn: body.widthIn != null ? Number(body.widthIn) : undefined,
+        heightIn: body.heightIn != null ? Number(body.heightIn) : undefined,
+        itemType,
+      })
+      if (rateResult.error && rateResult.error.includes('do not deliver')) {
+        return reply.code(400).send({ error: rateResult.error })
+      }
+      rateTotalCents = rateResult.totalCents ?? 0
+    }
 
     const orderId = await createOrder({
       stateId,
       originHubId,
+      originWarehouseCode,
+      originWarehouseName,
+      originWarehouseAddress,
       warehouseId: body.warehouseId,
       externalOrderId: body.orderId,
       externalShipmentId: body.shipmentId,
@@ -166,12 +211,12 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
       orderId,
       stateId,
       totalCents: rateTotalCents,
-      totalDollars: rateResult.totalDollars ?? (rateTotalCents / 100).toFixed(2),
+      totalDollars: (rateTotalCents / 100).toFixed(2),
     })
   })
 
   /**
-   * Get 4×6 shipping label HTML for a shipment (for WMS kiosk preview/print).
+   * Get 4×6 shipping label HTML for a shipment (identical format to Kiosk).
    * Auth: x-wms-webhook-secret must match WMS_WEBHOOK_SECRET.
    */
   app.get<{ Params: { id: string } }>(
@@ -184,53 +229,53 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
       const id = (request.params as { id: string }).id
       const doc = await Order.findById(id).lean()
       if (!doc) return reply.code(404).send({ error: 'Shipment not found' })
-      let fromBlock = ''
-      if (doc.originHubId) {
-        const hub = await Hub.findById(doc.originHubId).select('name addressLine1 addressLine2 addressCity addressState addressZip').lean()
+      const d = doc as any
+
+      const shipTo = [
+        d.addressName,
+        d.addressCompany,
+        d.addressLine1,
+        d.addressLine2,
+        [d.addressCity, d.addressState, d.addressZip].filter(Boolean).join(', '),
+        d.addressCountry,
+      ]
+        .filter(Boolean)
+        .join('\n') || '—'
+
+      let shipFrom = '—'
+      if (d.originWarehouseName && d.originWarehouseAddress) {
+        shipFrom = [d.originWarehouseName, d.originWarehouseAddress].filter(Boolean).join('\n')
+      } else if (d.originHubId) {
+        const hub = await Hub.findById(d.originHubId).select('name addressLine1 addressLine2 addressCity addressState addressZip').lean()
         if (hub) {
           const h = hub as any
-          const fromAddr = [h.addressLine1, h.addressLine2, [h.addressCity, h.addressState].filter(Boolean).join(', '), h.addressZip].filter(Boolean).join('\n')
-          fromBlock = `<div class="from" style="margin-bottom: 10px;"><div class="to">FROM:</div><div class="addr">${escapeHtml(h.name)}</div><div class="addr">${escapeHtml(fromAddr)}</div></div>`
+          shipFrom = [
+            h.name,
+            h.addressLine1,
+            h.addressLine2,
+            [h.addressCity, h.addressState, h.addressZip].filter(Boolean).join(', '),
+          ]
+            .filter(Boolean)
+            .join('\n')
         }
       }
-      const toName = [doc.addressName, doc.addressCompany].filter(Boolean).join(' / ') || 'Recipient'
-      const toAddr = [
-        doc.addressLine1,
-        doc.addressLine2,
-        [doc.addressCity, doc.addressState].filter(Boolean).join(', '),
-        doc.addressZip,
-      ].filter(Boolean).join('\n')
-      const orderShortId = String(doc._id).slice(-8).toUpperCase()
-      let itemBlock = ''
-      if (doc.itemName || doc.sku || doc.image || doc.description || doc.quantityUnits != null) {
-        const parts: string[] = []
-        if (doc.itemName) parts.push(escapeHtml(doc.itemName))
-        if (doc.sku) parts.push(`SKU: ${escapeHtml(doc.sku)}`)
-        if (doc.quantityUnits != null) parts.push(`Qty: ${doc.quantityUnits}`)
-        if (doc.description) parts.push(escapeHtml(doc.description))
-        const imgTag = doc.image ? `<img src="${escapeHtml(doc.image)}" alt="" style="max-width: 1.2in; max-height: 1in; object-fit: contain; margin-top: 4px;" />` : ''
-        itemBlock = `<div class="tracking" style="margin-bottom: 8px;">${parts.join(' · ')}${imgTag ? `<br/>${imgTag}` : ''}</div>`
-      }
-      const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Label ${orderShortId}</title>
-<style>
-  @page { size: 4in 6in; margin: 0.25in; }
-  body { font-family: Arial, sans-serif; font-size: 12px; margin: 0; padding: 0.25in; box-sizing: border-box; width: 4in; min-height: 6in; }
-  .to { font-weight: bold; margin-bottom: 4px; }
-  .addr { white-space: pre-line; line-height: 1.3; }
-  .tracking { margin-top: 12px; font-size: 10px; color: #666; }
-  .id { font-family: monospace; font-size: 14px; letter-spacing: 1px; }
-  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
-</style></head>
-<body>
-  ${fromBlock}
-  ${itemBlock}
-  <div class="to">TO:</div>
-  <div class="addr">${escapeHtml(toName)}</div>
-  <div class="addr">${escapeHtml(toAddr)}</div>
-  <div class="tracking">Order ID: <span class="id">${escapeHtml(orderShortId)}</span></div>
-  ${doc.weightLbs != null ? `<div class="tracking">Weight: ${escapeHtml(String(doc.weightLbs))} lbs</div>` : ''}
-</body></html>`
+
+      const trackingNumber = String(d._id)
+      const weight = d.weightLbs != null && d.weightLbs > 0 ? `${d.weightLbs} lbs` : '—'
+      const size =
+        d.lengthIn != null && d.widthIn != null && d.heightIn != null
+          ? `${d.lengthIn} × ${d.widthIn} × ${d.heightIn} in`
+          : '—'
+
+      const { generateUnieCourierLabelHtml } = await import('../services/label-template.service')
+      const html = generateUnieCourierLabelHtml({
+        trackingNumber,
+        shipTo,
+        shipFrom,
+        boxes: 1,
+        weight,
+        size,
+      })
       reply.header('Content-Type', 'text/html; charset=utf-8')
       return reply.send(html)
     }

@@ -15,6 +15,7 @@ export interface StateSummaryRow {
   in_progress: number
   completed_today: number
   failed_stops: number
+  queue_count: number
 }
 
 export async function getNationalSummary(): Promise<StateSummaryRow[]> {
@@ -38,6 +39,10 @@ export async function getNationalSummary(): Promise<StateSummaryRow[]> {
       routeId: { $in: routeIds },
       status: 'failed',
     })
+    const queueCount = await Order.countDocuments({
+      stateId: s._id,
+      status: { $in: ['pending', 'pending_pickup'] },
+    })
     results.push({
       state_id: String(s._id),
       state_code: s.code,
@@ -48,6 +53,7 @@ export async function getNationalSummary(): Promise<StateSummaryRow[]> {
       in_progress: inProgress,
       completed_today: completedToday,
       failed_stops: failedStops,
+      queue_count: queueCount,
     } as any)
   }
   return results
@@ -104,6 +110,42 @@ export async function getStateMetrics(stateId: string): Promise<{
     avgMilesPerRoute: 0,
     costPerStop: 0,
     driverAcceptanceRate,
+  }
+}
+
+/** Dispatch activity summary: queue, drivers, out for delivery, available drivers */
+export interface DispatchSummaryRow {
+  queueCount: number
+  driversTotal: number
+  outForDelivery: number
+  availableDrivers: number
+  routesAvailable: number
+  routesAssigned: number
+}
+
+export async function getDispatchSummary(stateId: string): Promise<DispatchSummaryRow> {
+  const filterState = stateId && stateId !== 'all'
+  const stateFilter = filterState ? { stateId } : {}
+  const stateFilterIn = filterState && stateId.includes(',') ? { stateId: { $in: stateId.split(',') } } : stateFilter
+
+  const [queueCount, driversTotal, routesOutForDelivery, routesAvailable, routesAssigned, routesWithDriver] = await Promise.all([
+    Order.countDocuments({ ...stateFilterIn, status: { $in: ['pending', 'pending_pickup'] } }),
+    Driver.countDocuments({ ...stateFilterIn, active: true }),
+    Route.countDocuments({ ...stateFilterIn, status: 'in_progress' }),
+    Route.countDocuments({ ...stateFilterIn, status: 'available' }),
+    Route.countDocuments({ ...stateFilterIn, status: 'assigned' }),
+    Route.find({ ...stateFilterIn, status: { $in: ['assigned', 'in_progress'] }, assignedDriverId: { $ne: null } }).select('assignedDriverId').lean(),
+  ])
+  const busyDriverIds = new Set((routesWithDriver as any[]).map((r) => String(r.assignedDriverId)).filter(Boolean))
+  const allDrivers = await Driver.find(stateFilterIn).select('_id').lean()
+  const availableDrivers = allDrivers.filter((d) => !busyDriverIds.has(String(d._id))).length
+  return {
+    queueCount,
+    driversTotal,
+    outForDelivery: routesOutForDelivery,
+    availableDrivers,
+    routesAvailable,
+    routesAssigned,
   }
 }
 

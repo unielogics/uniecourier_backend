@@ -53,7 +53,9 @@ async function start(): Promise<void> {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-State-Id'],
   })
-  await app.register(rateLimit, { max: 200, timeWindow: '1 minute' })
+  // Rate limit: 1000/min to support dashboard parallel requests (was 200, caused 429s on page load)
+  const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX || '1000', 10)
+  await app.register(rateLimit, { max: rateLimitMax, timeWindow: '1 minute' })
   await app.register(formbody)
   await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 } }) // 10MB for POD
 

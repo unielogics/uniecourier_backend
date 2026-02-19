@@ -7,6 +7,9 @@ import {
   assignRoute,
 } from '../repos/routes.repo'
 import * as driversRepo from '../repos/drivers.repo'
+import { getRatesByStateAndZips, getDefaultRateCents } from '../repos/zip_rate.repo'
+import { Order } from '../models/Order'
+import { Hub } from '../models/Hub'
 import { driverCanTakeRoute } from '../services/guardrails.service'
 import { findApprovedOverride, createOverrideRequest, approveOverride } from '../repos/override.repo'
 import { ZipCentroid } from '../models/ZipCentroid'
@@ -21,10 +24,14 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
       async (request: AuthenticatedRequest, reply) => {
         const q = request.query as { stateId?: string }
         const h = request.headers['x-state-id']
-        const stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h)
+        let stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h)
+        const scope = requireStateScope(request)
+        if (stateIdRaw === 'all') {
+          if (request.role !== 'admin' && scope) stateIdRaw = scope
+          else if (request.role !== 'admin') return reply.code(403).send({ error: 'All states requires admin role' })
+        }
         const stateId = typeof stateIdRaw === 'string' ? stateIdRaw : null
         if (!stateId) return reply.code(400).send({ error: 'stateId required' })
-        const scope = requireStateScope(request)
         if (request.role !== 'admin' && scope !== stateId) {
           return reply.code(403).send({ error: 'State not in scope' })
         }
@@ -50,7 +57,47 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
           return reply.code(403).send({ error: 'State not in scope' })
         }
         const stops = await getRouteStops(route.id)
-        return reply.send({ ...route, stops })
+        const orderIds = stops.map((s) => s.order_id)
+        const orders = await Order.find({ _id: { $in: orderIds } }).lean()
+        const orderMap = new Map(orders.map((o: any) => [String(o._id), o]))
+        const zips = [...new Set(stops.map((s) => s.address_zip).filter(Boolean))]
+        const zipRates = zips.length ? await getRatesByStateAndZips(route.state_id, zips) : new Map()
+        const defaultRate = await getDefaultRateCents(route.state_id)
+        const originHubIds = [...new Set(orders.map((o: any) => o.originHubId).filter(Boolean))]
+        const hubs = await Hub.find({ _id: { $in: originHubIds } }).select('name addressLine1 addressCity addressState addressZip').lean()
+        const hubMap = new Map(hubs.map((h: any) => [String(h._id), h]))
+        const stopsWithOrders = stops.map((s) => {
+          const order = orderMap.get(s.order_id) as any
+          if (!order) return { ...s, order: null, chargeCents: 0, payoutCents: 0, profitCents: 0 }
+          const chargeCents = order.rateTotalCents ?? 0
+          const payoutCents = zipRates.get(s.address_zip)?.driverPayoutCents ?? defaultRate.driverPayoutCents
+          const profitCents = chargeCents - payoutCents
+          const originHub = order.originHubId ? hubMap.get(String(order.originHubId)) : null
+          const orderData = {
+            id: String(order._id),
+            externalOrderId: order.externalOrderId,
+            externalShipmentId: order.externalShipmentId,
+            status: order.status,
+            addressLine1: order.addressLine1,
+            addressLine2: order.addressLine2,
+            addressCity: order.addressCity,
+            addressState: order.addressState,
+            addressZip: order.addressZip,
+            addressName: order.addressName,
+            addressCompany: order.addressCompany,
+            sku: order.sku,
+            itemName: order.itemName,
+            image: order.image,
+            description: order.description,
+            quantityUnits: order.quantityUnits,
+            weightLbs: order.weightLbs,
+            deadlineAt: order.deadlineAt,
+            rateTotalCents: order.rateTotalCents,
+            originHub: originHub ? { id: String(originHub._id), name: (originHub as any).name, address: [(originHub as any).addressLine1, (originHub as any).addressCity, (originHub as any).addressState, (originHub as any).addressZip].filter(Boolean).join(', ') } : null,
+          }
+          return { ...s, order: orderData, chargeCents, payoutCents, profitCents }
+        })
+        return reply.send({ ...route, stops: stopsWithOrders })
       }
     )
 
@@ -132,10 +179,14 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
       async (request: AuthenticatedRequest, reply) => {
         const q = request.query as { stateId?: string }
         const h = request.headers['x-state-id']
-        const stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h)
+        let stateIdRaw = q?.stateId ?? (Array.isArray(h) ? h[0] : h)
+        const scope = requireStateScope(request)
+        if (stateIdRaw === 'all') {
+          if (request.role !== 'admin' && scope) stateIdRaw = scope
+          else if (request.role !== 'admin') return reply.code(403).send({ error: 'All states requires admin role' })
+        }
         const stateId = typeof stateIdRaw === 'string' ? stateIdRaw : null
         if (!stateId) return reply.code(400).send({ error: 'stateId required' })
-        const scope = requireStateScope(request)
         if (request.role !== 'admin' && scope !== stateId) {
           return reply.code(403).send({ error: 'State not in scope' })
         }

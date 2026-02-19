@@ -6,6 +6,7 @@ import { Hub } from '../models/Hub'
 import { Warehouse } from '../models/Warehouse'
 import { createOrder } from '../repos/orders.repo'
 import { resolveStateFromZip, calculateRate } from '../services/rate-shop.service'
+import { getRatesByStateAndZips, getDefaultRateCents } from '../repos/zip_rate.repo'
 import { ORDER_STATUSES } from '../models/Order'
 
 export async function registerShipmentsRoutes(app: FastifyInstance): Promise<void> {
@@ -191,17 +192,30 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
             }
           }
         }
+        const d = doc as any
+        const chargeCents = d.rateTotalCents ?? 0
+        const zipRates = d.addressZip ? await getRatesByStateAndZips(String(doc.stateId), [d.addressZip]) : new Map()
+        const defaultRate = await getDefaultRateCents(String(doc.stateId))
+        const payoutCents = zipRates.get(d.addressZip)?.driverPayoutCents ?? defaultRate.driverPayoutCents
+        const profitCents = chargeCents - payoutCents
         return reply.send({
           id: String(doc._id),
           stateId: String(doc.stateId),
           originHubId: doc.originHubId ? String(doc.originHubId) : null,
-          originHub,
+          originHub: originHub ?? (d.originWarehouseName && d.originWarehouseAddress ? { id: d.originWarehouseCode || '', name: d.originWarehouseName, address: d.originWarehouseAddress } : null),
+          originWarehouseCode: d.originWarehouseCode ?? null,
+          originWarehouseName: d.originWarehouseName ?? null,
+          originWarehouseAddress: d.originWarehouseAddress ?? null,
+          warehouseId: doc.warehouseId ? String(doc.warehouseId) : null,
+          externalOrderId: doc.externalOrderId ?? null,
+          externalShipmentId: doc.externalShipmentId ?? null,
           status: doc.status,
           addressLine1: doc.addressLine1,
           addressLine2: doc.addressLine2,
           addressCity: doc.addressCity,
           addressState: doc.addressState,
           addressZip: doc.addressZip,
+          addressCountry: doc.addressCountry ?? 'US',
           addressName: doc.addressName,
           addressCompany: doc.addressCompany,
           weightLbs: doc.weightLbs,
@@ -210,6 +224,9 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
           heightIn: doc.heightIn,
           itemType: doc.itemType,
           rateTotalCents: doc.rateTotalCents,
+          chargeCents,
+          payoutCents,
+          profitCents,
           billingName: doc.billingName,
           billingCompany: doc.billingCompany,
           billingEmail: doc.billingEmail,
@@ -219,13 +236,14 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
           image: doc.image ?? null,
           description: doc.description ?? null,
           quantityUnits: doc.quantityUnits ?? null,
+          deadlineAt: doc.deadlineAt ?? null,
           createdAt: doc.createdAt,
           updatedAt: doc.updatedAt,
         })
       }
     )
 
-    // 4x6 shipping label (HTML for print)
+    // 4×6 shipping label (HTML for print) — same template as Kiosk (UnieLogo, barcode, ship to/from, boxes/weight/size, track URL)
     instance.get<{ Params: { id: string } }>(
       '/api/v1/shipments/:id/label',
       async (request: AuthenticatedRequest, reply) => {
@@ -236,53 +254,49 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
         if (request.role !== 'admin' && scope !== String(doc.stateId)) {
           return reply.code(403).send({ error: 'Shipment not in scope' })
         }
-        let fromBlock = ''
-        if (doc.originHubId) {
-          const hub = await Hub.findById(doc.originHubId).select('name addressLine1 addressLine2 addressCity addressState addressZip').lean()
+        const d = doc as any
+        let shipFrom = '—'
+        if (d.originWarehouseName && d.originWarehouseAddress) {
+          shipFrom = [d.originWarehouseName, d.originWarehouseAddress].filter(Boolean).join('\n')
+        } else if (d.originHubId) {
+          const hub = await Hub.findById(d.originHubId).select('name addressLine1 addressLine2 addressCity addressState addressZip').lean()
           if (hub) {
             const h = hub as any
-            const fromAddr = [h.addressLine1, h.addressLine2, [h.addressCity, h.addressState].filter(Boolean).join(', '), h.addressZip].filter(Boolean).join('\n')
-            fromBlock = `<div class="from" style="margin-bottom: 10px;"><div class="to">FROM:</div><div class="addr">${escapeHtml(h.name)}</div><div class="addr">${escapeHtml(fromAddr)}</div></div>`
+            shipFrom = [
+              h.name,
+              h.addressLine1,
+              h.addressLine2,
+              [h.addressCity, h.addressState, h.addressZip].filter(Boolean).join(', '),
+            ]
+              .filter(Boolean)
+              .join('\n')
           }
         }
-        const toName = [doc.addressName, doc.addressCompany].filter(Boolean).join(' / ') || 'Recipient'
-        const toAddr = [
-          doc.addressLine1,
-          doc.addressLine2,
-          [doc.addressCity, doc.addressState].filter(Boolean).join(', '),
-          doc.addressZip,
-        ].filter(Boolean).join('\n')
-        const orderShortId = String(doc._id).slice(-8).toUpperCase()
-        let itemBlock = ''
-        if (doc.itemName || doc.sku || doc.image || doc.description || doc.quantityUnits != null) {
-          const parts: string[] = []
-          if (doc.itemName) parts.push(escapeHtml(doc.itemName))
-          if (doc.sku) parts.push(`SKU: ${escapeHtml(doc.sku)}`)
-          if (doc.quantityUnits != null) parts.push(`Qty: ${doc.quantityUnits}`)
-          if (doc.description) parts.push(escapeHtml(doc.description))
-          const imgTag = doc.image ? `<img src="${escapeHtml(doc.image)}" alt="" style="max-width: 1.2in; max-height: 1in; object-fit: contain; margin-top: 4px;" />` : ''
-          itemBlock = `<div class="tracking" style="margin-bottom: 8px;">${parts.join(' · ')}${imgTag ? `<br/>${imgTag}` : ''}</div>`
-        }
-        const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Label ${orderShortId}</title>
-<style>
-  @page { size: 4in 6in; margin: 0.25in; }
-  body { font-family: Arial, sans-serif; font-size: 12px; margin: 0; padding: 0.25in; box-sizing: border-box; width: 4in; min-height: 6in; }
-  .to { font-weight: bold; margin-bottom: 4px; }
-  .addr { white-space: pre-line; line-height: 1.3; }
-  .tracking { margin-top: 12px; font-size: 10px; color: #666; }
-  .id { font-family: monospace; font-size: 14px; letter-spacing: 1px; }
-  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
-</style></head>
-<body>
-  ${fromBlock}
-  ${itemBlock}
-  <div class="to">TO:</div>
-  <div class="addr">${escapeHtml(toName)}</div>
-  <div class="addr">${escapeHtml(toAddr)}</div>
-  <div class="tracking">Order ID: <span class="id">${escapeHtml(orderShortId)}</span></div>
-  ${doc.weightLbs != null ? `<div class="tracking">Weight: ${escapeHtml(String(doc.weightLbs))} lbs</div>` : ''}
-</body></html>`
+        const shipTo = [
+          d.addressName,
+          d.addressCompany,
+          d.addressLine1,
+          d.addressLine2,
+          [d.addressCity, d.addressState, d.addressZip].filter(Boolean).join(', '),
+          d.addressCountry,
+        ]
+          .filter(Boolean)
+          .join('\n') || '—'
+        const trackingNumber = String(d._id)
+        const weight = d.weightLbs != null && d.weightLbs > 0 ? `${d.weightLbs} lbs` : '—'
+        const size =
+          d.lengthIn != null && d.widthIn != null && d.heightIn != null
+            ? `${d.lengthIn} × ${d.widthIn} × ${d.heightIn} in`
+            : '—'
+        const { generateUnieCourierLabelHtml } = await import('../services/label-template.service')
+        const html = generateUnieCourierLabelHtml({
+          trackingNumber,
+          shipTo,
+          shipFrom,
+          boxes: 1,
+          weight,
+          size,
+        })
         reply.header('Content-Type', 'text/html; charset=utf-8')
         return reply.send(html)
       }
@@ -310,12 +324,4 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
       }
     )
   })
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
 }
