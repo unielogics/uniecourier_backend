@@ -6,9 +6,9 @@ const ItemTypeSurchargeSchema = new Schema(
     zipCode: { type: String, default: '' }, // '' = state-level default; otherwise per-zip in service area
     itemType: { type: String, required: true }, // e.g. 'parcel', 'freight', 'bulk', 'hazmat'
     label: { type: String, required: true },
-    costCents: { type: Number }, // our cost (base) in cents; missing = not configured → needs attention
+    costDollars: { type: Number }, // our cost (base) in dollars; missing = not configured → needs attention. Decimals allowed.
     type: { type: String, required: true, enum: ['flat', 'percent'] },
-    valueCents: { type: Number, required: true, default: 0 }, // surcharge: flat cents or percent (e.g. 15 = 15%)
+    value: { type: Number, required: true, default: 0 }, // surcharge: flat = dollars, percent = e.g. 15 = 15%. Decimals allowed.
     active: { type: Boolean, default: true },
   },
   { timestamps: true, collection: 'item_type_surcharges' }

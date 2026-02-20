@@ -258,7 +258,7 @@ export async function calculateRate(input: RateShopInput): Promise<RateShopResul
   const inServiceArea = await ServiceAreaZip.exists({ stateId, zipCode: zip })
 
   // 1) Surcharge: try ZIP-level then state default (single combined line added after we compute add)
-  let surcharge: { costCents?: number; type: string; valueCents: number; zipCode?: string } | null = null
+  let surcharge: { costDollars?: number; type: string; value: number; zipCode?: string } | null = null
   const zipSurcharge = await ItemTypeSurcharge.findOne({ stateId, zipCode: zip, itemType: input.itemType, active: true }).lean()
   if (zipSurcharge) {
     surcharge = zipSurcharge as any
@@ -275,7 +275,9 @@ export async function calculateRate(input: RateShopInput): Promise<RateShopResul
     }
   }
 
-  const baseCostCents = surcharge?.costCents ?? 0
+  // Support legacy costCents/valueCents for migration; prefer new costDollars/value
+  const baseCostDollars = surcharge?.costDollars ?? (surcharge && (surcharge as any).costCents != null ? (surcharge as any).costCents / 100 : undefined)
+  const baseCostCents = baseCostDollars != null ? Math.round(baseCostDollars * 100) : 0
   if (surcharge == null) {
     breakdown.push({ step: 'Base cost', value: 'Not configured for this item type / ZIP', cents: 0 })
   }
@@ -307,12 +309,14 @@ export async function calculateRate(input: RateShopInput): Promise<RateShopResul
   let totalCents = baseCostCents + tierPlusCents
 
   // 3) Apply surcharge (percent or flat) — one combined line for surcharge (state default or ZIP)
+  // value: percent = e.g. 15 = 15%; flat = dollars
   if (surcharge && totalCents > 0) {
+    const rawValue = surcharge.value ?? ((surcharge as any).valueCents != null ? ((surcharge as any).type === 'percent' ? (surcharge as any).valueCents : (surcharge as any).valueCents / 100) : 0)
     const add = surcharge.type === 'percent'
-      ? Math.round((totalCents * (surcharge.valueCents ?? 0)) / 100)
-      : (surcharge.valueCents ?? 0)
+      ? Math.round((totalCents * rawValue) / 100)
+      : Math.round(Number(rawValue) * 100)
     totalCents += add
-    const surchargeCents = (surcharge.costCents ?? 0) + add
+    const surchargeCents = baseCostCents + add
     const step = surcharge.zipCode ? 'Surcharge (ZIP)' : 'ZIP code delivery cost'
     const value = surcharge.zipCode ? `ZIP ${zip}` : 'State default'
     breakdown.push({ step, value, cents: surchargeCents })

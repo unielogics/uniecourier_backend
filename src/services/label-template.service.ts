@@ -16,6 +16,8 @@ export interface LabelData {
   boxes: number
   weight: string
   size: string
+  /** Intermediary (bill-to) name for display on label */
+  intermediaryName?: string
   logoUrl?: string
 }
 
@@ -209,7 +211,12 @@ export function generateUnieCourierLabelHtml(data: LabelData): string {
     <div class="label-section-title">Ship from:</div>
     <div class="label-ship-block">${escapeHtml(data.shipFrom)}</div>
   </div>
-
+  ${data.intermediaryName ? `
+  <div class="label-section">
+    <div class="label-section-title">Sent To You By:</div>
+    <div class="label-ship-block">${escapeHtml(data.intermediaryName)}</div>
+  </div>
+  ` : ''}
   <div class="label-meta-row">
     <span><strong>Boxes:</strong> ${escapeHtml(String(data.boxes))}</span>
     <span><strong>Weight:</strong> ${escapeHtml(data.weight)}</span>

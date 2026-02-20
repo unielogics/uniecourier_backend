@@ -301,3 +301,46 @@ export async function getRouteStopById(stopId: string): Promise<RouteStopRow | n
   if (!doc) return null
   return toStopRow(doc)
 }
+
+export async function removeRouteStop(stopId: string): Promise<{ ok: boolean; orderId?: string; routeId?: string }> {
+  const stop = await RouteStop.findById(stopId).lean()
+  if (!stop) return { ok: false }
+  const routeId = String(stop.routeId)
+  const orderId = String(stop.orderId)
+  const route = await Route.findById(routeId).lean()
+  if (!route) return { ok: false }
+  if ((route as any).status === 'completed') return { ok: false }
+  await RouteStop.deleteOne({ _id: stopId })
+  const { updateOrderStatus } = await import('./orders.repo')
+  await updateOrderStatus(orderId, 'pending_pickup')
+  const remaining = await RouteStop.find({ routeId }).sort({ sequence: 1 }).lean()
+  for (let i = 0; i < remaining.length; i++) {
+    await RouteStop.updateOne({ _id: remaining[i]._id }, { sequence: i + 1 })
+  }
+  const { Order } = await import('../models/Order')
+  const { getRatesByStateAndZips, getDefaultRateCents } = await import('./zip_rate.repo')
+  const orderIds = remaining.map((s: any) => s.orderId)
+  const orders = orderIds.length > 0 ? await Order.find({ _id: { $in: orderIds } }).lean() : []
+  const orderMap = new Map(orders.map((o: any) => [String(o._id), o]))
+  const zips = [...new Set(remaining.map((s: any) => s.addressZip).filter(Boolean))]
+  const zipRates = zips.length ? await getRatesByStateAndZips(String(route.stateId), zips) : new Map()
+  const defaultRate = await getDefaultRateCents(String(route.stateId))
+  let totalCharge = 0
+  let totalPayout = 0
+  for (const s of remaining as any[]) {
+    const o = orderMap.get(String(s.orderId))
+    if (o) {
+      totalCharge += (o as any).rateTotalCents ?? 0
+      totalPayout += zipRates.get(s.addressZip)?.driverPayoutCents ?? defaultRate.driverPayoutCents
+    }
+  }
+  await Route.findByIdAndUpdate(routeId, {
+    totalClientChargeCents: totalCharge,
+    totalDriverPayoutCents: totalPayout,
+    marginCents: totalCharge - totalPayout,
+  })
+  if (remaining.length === 0) {
+    await Route.findByIdAndUpdate(routeId, { status: 'cancelled' })
+  }
+  return { ok: true, orderId, routeId }
+}

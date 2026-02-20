@@ -4,6 +4,7 @@ import { RouteStop } from '../models/RouteStop'
 import { Driver } from '../models/Driver'
 import { Order } from '../models/Order'
 import { ItemTypeSurcharge } from '../models/ItemTypeSurcharge'
+import { DeliveryDispute } from '../models/DeliveryDispute'
 
 export interface StateSummaryRow {
   state_id: string
@@ -16,6 +17,7 @@ export interface StateSummaryRow {
   completed_today: number
   failed_stops: number
   queue_count: number
+  disputes_count: number
 }
 
 export async function getNationalSummary(): Promise<StateSummaryRow[]> {
@@ -39,10 +41,16 @@ export async function getNationalSummary(): Promise<StateSummaryRow[]> {
       routeId: { $in: routeIds },
       status: 'failed',
     })
-    const queueCount = await Order.countDocuments({
-      stateId: s._id,
-      status: { $in: ['pending', 'pending_pickup'] },
-    })
+    const [queueCount, disputesCount] = await Promise.all([
+      Order.countDocuments({
+        stateId: s._id,
+        status: { $in: ['pending', 'pending_pickup'] },
+      }),
+      DeliveryDispute.countDocuments({
+        stateId: s._id,
+        status: 'open',
+      }),
+    ])
     results.push({
       state_id: String(s._id),
       state_code: s.code,
@@ -54,6 +62,7 @@ export async function getNationalSummary(): Promise<StateSummaryRow[]> {
       completed_today: completedToday,
       failed_stops: failedStops,
       queue_count: queueCount,
+      disputes_count: disputesCount,
     } as any)
   }
   return results
@@ -155,7 +164,7 @@ export interface MapStateRow {
   state_name: string
   drivers_count: number
   shipments_count: number
-  fees: { itemType: string; label: string; costCents?: number; type: string; valueCents: number }[]
+  fees: { itemType: string; label: string; costDollars?: number; type: string; value: number }[]
 }
 
 export async function getMapData(): Promise<MapStateRow[]> {
@@ -176,9 +185,9 @@ export async function getMapData(): Promise<MapStateRow[]> {
       fees: (stateSurcharges || []).map((x: any) => ({
         itemType: x.itemType,
         label: x.label || x.itemType,
-        costCents: x.costCents,
+        costDollars: x.costDollars ?? (x.costCents != null ? x.costCents / 100 : undefined),
         type: x.type || 'flat',
-        valueCents: x.valueCents ?? 0,
+        value: x.value ?? (x.valueCents != null ? (x.type === 'percent' ? x.valueCents : x.valueCents / 100) : 0),
       })),
     })
   }

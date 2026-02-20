@@ -83,6 +83,11 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
               addressState: order.addressState,
               addressZip: order.addressZip,
               originHubId: order.originHubId ? String(order.originHubId) : null,
+              originWarehouseCode: (order as any).originWarehouseCode ?? null,
+              originWarehouseName: (order as any).originWarehouseName ?? null,
+              originWarehouseAddress: (order as any).originWarehouseAddress ?? null,
+              intermediaryId: (order as any).intermediaryId ?? null,
+              intermediaryName: (order as any).intermediaryName ?? null,
               sku: order.sku ?? null,
               itemName: order.itemName ?? null,
               image: order.image ?? null,
@@ -99,6 +104,7 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
               chargeCents,
               payoutCents,
               profitCents,
+              paymentStatus: (order as any).paymentStatus === 'paid' ? 'paid' : 'unpaid',
             })
           }
         }
@@ -118,6 +124,11 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
             addressState: o.addressState,
             addressZip: o.addressZip,
             originHubId: o.originHubId ? String(o.originHubId) : null,
+            originWarehouseCode: (o as any).originWarehouseCode ?? null,
+            originWarehouseName: (o as any).originWarehouseName ?? null,
+            originWarehouseAddress: (o as any).originWarehouseAddress ?? null,
+            intermediaryId: (o as any).intermediaryId ?? null,
+            intermediaryName: (o as any).intermediaryName ?? null,
             sku: o.sku ?? null,
             itemName: o.itemName ?? null,
             image: o.image ?? null,
@@ -134,6 +145,7 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
             chargeCents,
             payoutCents,
             profitCents,
+            paymentStatus: (ord as any).paymentStatus === 'paid' ? 'paid' : 'unpaid',
           })
         }
         const allOrders = [...orders, ...pendingOrders]
@@ -145,6 +157,9 @@ export async function registerShipmentsBoardRoutes(app: FastifyInstance): Promis
         }
         for (const row of rows) {
           row.originHubName = row.originHubId ? hubMap.get(row.originHubId) ?? null : null
+          row.originDisplay = row.originHubName ?? (row.originWarehouseName && row.originWarehouseAddress
+            ? [row.originWarehouseName, row.originWarehouseAddress].join('\n')
+            : row.originWarehouseName ?? row.originWarehouseAddress ?? null)
         }
         return reply.send(rows)
       }

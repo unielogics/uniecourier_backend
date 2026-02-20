@@ -21,6 +21,8 @@ import { registerConfigRoutes } from './routes/config.routes'
 import { registerCommentsRoutes } from './routes/comments.routes'
 import { registerIssuesRoutes } from './routes/issues.routes'
 import { registerShipmentsBoardRoutes } from './routes/shipments-board.routes'
+import { registerFinancialRoutes } from './routes/financial.routes'
+import { registerDisputesRoutes } from './routes/disputes.routes'
 import { registerUsersRoutes } from './routes/users.routes'
 import { registerProfileRoutes } from './routes/profile.routes'
 import { registerRateShopRoutes } from './routes/rate-shop.routes'
@@ -75,6 +77,8 @@ async function start(): Promise<void> {
   await registerCommentsRoutes(app)
   await registerIssuesRoutes(app)
   await registerShipmentsBoardRoutes(app)
+  await registerFinancialRoutes(app)
+  await registerDisputesRoutes(app)
   await registerUsersRoutes(app)
   await registerProfileRoutes(app)
   await registerRateShopRoutes(app)

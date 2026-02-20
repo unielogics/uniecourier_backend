@@ -44,6 +44,8 @@ export async function createOrder(data: {
   billingCompany?: string
   billingEmail?: string
   billingPhone?: string
+  intermediaryId?: string
+  intermediaryName?: string
   status?: string
   sku?: string
   itemName?: string
@@ -80,6 +82,8 @@ export async function createOrder(data: {
     billingCompany: data.billingCompany,
     billingEmail: data.billingEmail,
     billingPhone: data.billingPhone,
+    intermediaryId: data.intermediaryId,
+    intermediaryName: data.intermediaryName,
     sku: data.sku,
     itemName: data.itemName,
     image: data.image,
@@ -109,7 +113,11 @@ export async function findOrderById(id: string): Promise<OrderRow | null> {
 }
 
 export async function listOrdersByStatePending(stateId: string): Promise<OrderRow[]> {
-  const docs = await Order.find({ stateId, status: { $in: ['pending', 'pending_pickup'] } })
+  const docs = await Order.find({
+    stateId,
+    status: { $in: ['pending', 'pending_pickup'] },
+    paymentStatus: 'paid',
+  })
     .sort({ createdAt: 1 })
     .lean()
   return docs.map((d) => ({
@@ -134,6 +142,14 @@ export async function markOrderInRoute(orderId: string): Promise<void> {
 
 export async function updateOrderStatus(orderId: string, status: string): Promise<void> {
   await Order.findByIdAndUpdate(orderId, { status })
+}
+
+export async function updateOrderPaymentStatus(
+  orderId: string,
+  paymentStatus: 'paid' | 'unpaid'
+): Promise<boolean> {
+  const res = await Order.findByIdAndUpdate(orderId, { paymentStatus })
+  return !!res
 }
 
 export async function getOrdersByRouteId(routeId: string): Promise<OrderRow[]> {

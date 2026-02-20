@@ -21,7 +21,14 @@ const DriverSchema = new Schema(
     licenseNumber: String,
     licenseState: String,
     licenseExpiry: Date,
-    active: { type: Boolean, default: true },
+    licenseImageFrontKey: String,
+    licenseImageBackKey: String,
+    driverPhotoKey: String,
+    /** pending_review = applicant, not yet approved; approved = can take routes; rejected = application denied */
+    applicationStatus: { type: String, enum: ['pending_review', 'approved', 'rejected'], default: 'pending_review' },
+    active: { type: Boolean, default: false },
+    /** When true, driver is temporarily paused (e.g. not taking new routes). Distinct from active=false (disabled). */
+    onHold: { type: Boolean, default: false },
   },
   { timestamps: true, collection: 'drivers' }
 )

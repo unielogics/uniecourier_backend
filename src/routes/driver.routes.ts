@@ -11,7 +11,7 @@ import {
   updateStopStatus,
   getRouteStopById,
 } from '../repos/routes.repo'
-import { getDriverZips } from '../repos/drivers.repo'
+import { getDriverZips, findDriverById } from '../repos/drivers.repo'
 import { podKey, getPresignedUrl } from '../config/s3'
 
 const RADIUS_MILES = 25
@@ -21,13 +21,26 @@ export async function registerDriverRoutes(app: FastifyInstance): Promise<void> 
     instance.addHook('preHandler', authMiddleware)
     instance.addHook('preHandler', requireRole('driver'))
 
-    instance.get('/api/v1/driver/routes/available', async (request: AuthenticatedRequest, reply) => {
-      const driverId = request.driverId as string | undefined
-      const stateId = request.stateId as string | undefined
-      if (!driverId || !stateId) {
-        return reply.code(403).send({ error: 'Driver not linked to state' })
-      }
-      const zips = await getDriverZips(driverId)
+        instance.get('/api/v1/driver/application-status', async (request: AuthenticatedRequest, reply) => {
+          const driverId = request.driverId as string | undefined
+          if (!driverId) return reply.code(403).send({ error: 'Driver not linked' })
+          const driver = await findDriverById(driverId)
+          if (!driver) return reply.code(404).send({ error: 'Driver not found' })
+          const status = (driver as any).applicationStatus ?? (driver.active ? 'approved' : 'pending_review')
+          return reply.send({ status, active: driver.active })
+        })
+
+        instance.get('/api/v1/driver/routes/available', async (request: AuthenticatedRequest, reply) => {
+          const driverId = request.driverId as string | undefined
+          const stateId = request.stateId as string | undefined
+          if (!driverId || !stateId) {
+            return reply.code(403).send({ error: 'Driver not linked to state' })
+          }
+          const driver = await findDriverById(driverId)
+          if (!driver?.active) {
+            return reply.send([])
+          }
+          const zips = await getDriverZips(driverId)
       const driverZipList = zips.map((z) => z.zip)
       const driverZipLatLons = zips
         .filter((z) => z.lat != null && z.lon != null)

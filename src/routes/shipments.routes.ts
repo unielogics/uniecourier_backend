@@ -4,7 +4,7 @@ import { authMiddleware, requireRole, requireStateScope, type AuthenticatedReque
 import { Order } from '../models/Order'
 import { Hub } from '../models/Hub'
 import { Warehouse } from '../models/Warehouse'
-import { createOrder } from '../repos/orders.repo'
+import { createOrder, updateOrderPaymentStatus } from '../repos/orders.repo'
 import { resolveStateFromZip, calculateRate } from '../services/rate-shop.service'
 import { getRatesByStateAndZips, getDefaultRateCents } from '../repos/zip_rate.repo'
 import { ORDER_STATUSES } from '../models/Order'
@@ -206,6 +206,8 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
           originWarehouseCode: d.originWarehouseCode ?? null,
           originWarehouseName: d.originWarehouseName ?? null,
           originWarehouseAddress: d.originWarehouseAddress ?? null,
+          intermediaryId: d.intermediaryId ?? null,
+          intermediaryName: d.intermediaryName ?? null,
           warehouseId: doc.warehouseId ? String(doc.warehouseId) : null,
           externalOrderId: doc.externalOrderId ?? null,
           externalShipmentId: doc.externalShipmentId ?? null,
@@ -237,6 +239,7 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
           description: doc.description ?? null,
           quantityUnits: doc.quantityUnits ?? null,
           deadlineAt: doc.deadlineAt ?? null,
+          paymentStatus: (doc as any).paymentStatus ?? 'unpaid',
           createdAt: doc.createdAt,
           updatedAt: doc.updatedAt,
         })
@@ -288,6 +291,7 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
           d.lengthIn != null && d.widthIn != null && d.heightIn != null
             ? `${d.lengthIn} × ${d.widthIn} × ${d.heightIn} in`
             : '—'
+        const intermediaryName = d.intermediaryName ?? d.billingName ?? undefined
         const { generateUnieCourierLabelHtml } = await import('../services/label-template.service')
         const html = generateUnieCourierLabelHtml({
           trackingNumber,
@@ -296,6 +300,7 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
           boxes: 1,
           weight,
           size,
+          intermediaryName,
         })
         reply.header('Content-Type', 'text/html; charset=utf-8')
         return reply.send(html)
@@ -321,6 +326,31 @@ export async function registerShipmentsRoutes(app: FastifyInstance): Promise<voi
         doc.status = status
         await doc.save()
         return reply.send({ id, status: doc.status })
+      }
+    )
+
+    // Update shipment payment status (admin/manager only)
+    instance.patch<{ Params: { id: string }; Body: { paymentStatus: string } }>(
+      '/api/v1/shipments/:id/payment-status',
+      async (request: AuthenticatedRequest, reply) => {
+        const id = (request.params as { id: string }).id
+        const body = request.body as any
+        const paymentStatus = body?.paymentStatus ? String(body.paymentStatus).trim() : ''
+        if (paymentStatus !== 'paid' && paymentStatus !== 'unpaid') {
+          return reply.code(400).send({ error: 'paymentStatus must be "paid" or "unpaid"' })
+        }
+        if (request.role !== 'admin' && request.role !== 'manager') {
+          return reply.code(403).send({ error: 'Admin or Manager only' })
+        }
+        const doc = await Order.findById(id).lean()
+        if (!doc) return reply.code(404).send({ error: 'Shipment not found' })
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== String(doc.stateId)) {
+          return reply.code(403).send({ error: 'Shipment not in scope' })
+        }
+        const ok = await updateOrderPaymentStatus(id, paymentStatus as 'paid' | 'unpaid')
+        if (!ok) return reply.code(404).send({ error: 'Shipment not found' })
+        return reply.send({ id, paymentStatus })
       }
     )
   })

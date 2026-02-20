@@ -23,6 +23,7 @@ export interface DriverRow {
   licenseState: string | null
   licenseExpiry: Date | null
   active: boolean
+  onHold: boolean
   createdAt: Date
   updatedAt: Date
 }
@@ -60,6 +61,7 @@ export async function findDriverById(id: string): Promise<DriverRow | null> {
     licenseState: d.licenseState ?? null,
     licenseExpiry: d.licenseExpiry ?? null,
     active: doc.active,
+    onHold: (doc as any).onHold ?? false,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   }
@@ -91,9 +93,20 @@ export async function findDriverByUserId(userId: string): Promise<DriverRow | nu
     licenseState: d.licenseState ?? null,
     licenseExpiry: d.licenseExpiry ?? null,
     active: doc.active,
+    onHold: d.onHold ?? false,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   }
+}
+
+export async function updateDriverStatus(
+  driverId: string,
+  update: { active?: boolean; onHold?: boolean; applicationStatus?: 'pending_review' | 'approved' | 'rejected' }
+): Promise<boolean> {
+  const set: Record<string, unknown> = { ...update }
+  if (update.active === true) set.applicationStatus = 'approved'
+  const doc = await Driver.findByIdAndUpdate(driverId, { $set: set }).lean()
+  return !!doc
 }
 
 export async function listDriversByState(
@@ -126,6 +139,7 @@ export async function listDriversByState(
     licenseState: d.licenseState ?? null,
     licenseExpiry: d.licenseExpiry ?? null,
     active: d.active,
+    onHold: d.onHold ?? false,
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
   }))

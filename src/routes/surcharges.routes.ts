@@ -29,7 +29,7 @@ export async function registerSurchargesRoutes(app: FastifyInstance): Promise<vo
       }
     )
 
-    instance.put<{ Body: { stateId: string; zipCode?: string; itemType: string; label: string; type: 'flat' | 'percent'; valueCents: number } }>(
+    instance.put<{ Body: { stateId: string; zipCode?: string; itemType: string; label: string; type: 'flat' | 'percent'; value: number } }>(
       '/api/v1/surcharges',
       async (request: AuthenticatedRequest, reply) => {
         const body = request.body as any
@@ -42,16 +42,16 @@ export async function registerSurchargesRoutes(app: FastifyInstance): Promise<vo
         }
         const zipCode = body.zipCode != null ? String(body.zipCode) : ''
         const type = body.type === 'percent' ? 'percent' : 'flat'
-        const valueCents = Number(body.valueCents) || 0
-        const costCents = body.costCents != null ? Number(body.costCents) : undefined
+        const value = Number(body.value) ?? 0
+        const costDollars = body.costDollars != null ? Number(body.costDollars) : undefined
         const filter: any = { stateId: body.stateId, itemType: body.itemType }
         if (zipCode === '') {
           filter.$or = [{ zipCode: '' }, { zipCode: { $exists: false } }, { zipCode: null }]
         } else {
           filter.zipCode = zipCode
         }
-        const update: any = { label: body.label, type, valueCents, active: true, zipCode: zipCode }
-        if (costCents !== undefined) update.costCents = costCents
+        const update: any = { label: body.label, type, value, active: true, zipCode: zipCode }
+        if (costDollars !== undefined) update.costDollars = costDollars
         const doc = await ItemTypeSurcharge.findOneAndUpdate(
           filter,
           update,

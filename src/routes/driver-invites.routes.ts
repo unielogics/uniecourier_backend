@@ -6,6 +6,7 @@ import { Driver } from '../models/Driver'
 import { User } from '../models/User'
 import { DriverZipCoverage } from '../models/DriverZipCoverage'
 import bcrypt from 'bcryptjs'
+import { s3, getPODBucket, driverDocKey } from '../config/s3'
 
 const INVITE_EXPIRY_DAYS = 7
 
@@ -68,6 +69,48 @@ export async function registerDriverInvitesRoutes(app: FastifyInstance): Promise
     )
   })
 
+  // Upload driver document (license front/back, driver photo) — public, token-validated
+  app.post<{}>('/api/v1/driver-invites/upload-document', async (request, reply) => {
+    let token = ''
+    let docType = ''
+    let buffer: Buffer | null = null
+    let mimetype = 'image/jpeg'
+    const parts = (request as any).parts()
+    for await (const part of parts) {
+      if (part.fieldname === 'token') token = String(part.value ?? '').trim()
+      else if (part.fieldname === 'docType') docType = String(part.value ?? '').trim()
+      else if (part.fieldname === 'file' && part.file) {
+        buffer = await part.toBuffer()
+        mimetype = part.mimetype || 'image/jpeg'
+      }
+    }
+    if (!buffer) return reply.code(400).send({ error: 'No file uploaded' })
+    const validTypes = ['license_front', 'license_back', 'driver_photo']
+    if (!token || !validTypes.includes(docType)) {
+      return reply.code(400).send({ error: 'token and docType (license_front|license_back|driver_photo) required' })
+    }
+    const invite = await DriverInvite.findOne({ token, status: 'pending' })
+    if (!invite) return reply.code(404).send({ error: 'Invite not found or expired' })
+    if (new Date() > invite.expiresAt) {
+      await DriverInvite.updateOne({ _id: invite._id }, { status: 'expired' })
+      return reply.code(410).send({ error: 'Invite expired' })
+    }
+    const ext = (mimetype === 'image/png' ? 'png' : mimetype === 'image/jpeg' || mimetype === 'image/jpg' ? 'jpg' : 'jpg')
+    const key = driverDocKey(token, docType, ext)
+    try {
+      await s3.putObject({
+        Bucket: getPODBucket(),
+        Key: key,
+        Body: buffer,
+        ContentType: mimetype,
+      }).promise()
+    } catch (err) {
+      request.log.error(err, 'S3 upload failed')
+      return reply.code(500).send({ error: 'Upload failed' })
+    }
+    return reply.send({ key })
+  })
+
   app.get<{ Querystring: { token: string } }>(
     '/api/v1/driver-invites/validate',
     async (request, reply) => {
@@ -103,6 +146,9 @@ export async function registerDriverInvitesRoutes(app: FastifyInstance): Promise
       licenseNumber?: string
       licenseState?: string
       licenseExpiry?: string
+      licenseImageFrontKey?: string
+      licenseImageBackKey?: string
+      driverPhotoKey?: string
       password: string
       zips?: string[]
     }
@@ -111,6 +157,9 @@ export async function registerDriverInvitesRoutes(app: FastifyInstance): Promise
     if (!body?.token || !body?.name || !body?.email || !body?.password) {
       return reply.code(400).send({ error: 'token, name, email, password required' })
     }
+    const licenseImageFrontKey = body.licenseImageFrontKey?.trim() || undefined
+    const licenseImageBackKey = body.licenseImageBackKey?.trim() || undefined
+    const driverPhotoKey = body.driverPhotoKey?.trim() || undefined
     const invite = await DriverInvite.findOne({ token: body.token, status: 'pending' })
     if (!invite) return reply.code(404).send({ error: 'Invite not found or expired' })
     if (new Date() > invite.expiresAt) {
@@ -149,7 +198,11 @@ export async function registerDriverInvitesRoutes(app: FastifyInstance): Promise
       licenseNumber: body.licenseNumber,
       licenseState: body.licenseState,
       licenseExpiry,
-      active: true,
+      licenseImageFrontKey,
+      licenseImageBackKey,
+      driverPhotoKey,
+      applicationStatus: 'pending_review',
+      active: false,
     })
     const zipsToAdd = Array.isArray(body.zips) && body.zips.length
       ? body.zips

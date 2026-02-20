@@ -5,6 +5,7 @@ import {
   getRouteById,
   getRouteStops,
   assignRoute,
+  removeRouteStop,
 } from '../repos/routes.repo'
 import * as driversRepo from '../repos/drivers.repo'
 import { getRatesByStateAndZips, getDefaultRateCents } from '../repos/zip_rate.repo'
@@ -42,7 +43,27 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
           | 'completed'
           | undefined
         const routes = await listRoutesByState(stateId, status)
-        return reply.send(routes)
+        if (routes.length === 0) return reply.send(routes)
+        const driverIds = [...new Set(routes.map((r) => r.assigned_driver_id).filter(Boolean))] as string[]
+        const drivers = driverIds.length > 0 ? await Promise.all(driverIds.map((id) => driversRepo.findDriverById(id))) : []
+        const driverMap = new Map(drivers.filter(Boolean).map((d) => [d!.id, d!.name]))
+        const { RouteStop } = await import('../models/RouteStop')
+        const stops = await RouteStop.find({ routeId: { $in: routes.map((r) => r.id) } }).lean()
+        const orderIds = [...new Set(stops.map((s: any) => s.orderId))]
+        const orders = orderIds.length > 0 ? await Order.find({ _id: { $in: orderIds } }).select('_id paymentStatus').lean() : []
+        const orderPaymentMap = new Map(orders.map((o: any) => [String(o._id), o.paymentStatus === 'paid']))
+        const routeUnpaidMap = new Map<string, boolean>()
+        for (const s of stops as any[]) {
+          const rid = String(s.routeId)
+          const paid = orderPaymentMap.get(String(s.orderId)) ?? false
+          if (!paid) routeUnpaidMap.set(rid, true)
+        }
+        const routesWithMeta = routes.map((r) => ({
+          ...r,
+          assignedDriverName: r.assigned_driver_id ? driverMap.get(r.assigned_driver_id) ?? null : null,
+          allStopsPaid: stops.length === 0 ? true : !routeUnpaidMap.get(r.id),
+        }))
+        return reply.send(routesWithMeta)
       }
     )
 
@@ -66,12 +87,26 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
         const originHubIds = [...new Set(orders.map((o: any) => o.originHubId).filter(Boolean))]
         const hubs = await Hub.find({ _id: { $in: originHubIds } }).select('name addressLine1 addressCity addressState addressZip').lean()
         const hubMap = new Map(hubs.map((h: any) => [String(h._id), h]))
+        let assignedDriver: { id: string; name: string; email: string | null; phone: string | null } | null = null
+        if (route.assigned_driver_id) {
+          const driver = await driversRepo.findDriverById(route.assigned_driver_id)
+          if (driver) {
+            assignedDriver = {
+              id: driver.id,
+              name: driver.name,
+              email: driver.email ?? null,
+              phone: driver.phone ?? null,
+            }
+          }
+        }
+
         const stopsWithOrders = stops.map((s) => {
           const order = orderMap.get(s.order_id) as any
-          if (!order) return { ...s, order: null, chargeCents: 0, payoutCents: 0, profitCents: 0 }
+          if (!order) return { ...s, order: null, chargeCents: 0, payoutCents: 0, profitCents: 0, paymentStatus: 'unpaid' }
           const chargeCents = order.rateTotalCents ?? 0
           const payoutCents = zipRates.get(s.address_zip)?.driverPayoutCents ?? defaultRate.driverPayoutCents
           const profitCents = chargeCents - payoutCents
+          const paymentStatus = order.paymentStatus === 'paid' ? 'paid' : 'unpaid'
           const originHub = order.originHubId ? hubMap.get(String(order.originHubId)) : null
           const orderData = {
             id: String(order._id),
@@ -93,11 +128,20 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
             weightLbs: order.weightLbs,
             deadlineAt: order.deadlineAt,
             rateTotalCents: order.rateTotalCents,
+            paymentStatus,
             originHub: originHub ? { id: String(originHub._id), name: (originHub as any).name, address: [(originHub as any).addressLine1, (originHub as any).addressCity, (originHub as any).addressState, (originHub as any).addressZip].filter(Boolean).join(', ') } : null,
           }
-          return { ...s, order: orderData, chargeCents, payoutCents, profitCents }
+          return { ...s, order: orderData, chargeCents, payoutCents, profitCents, paymentStatus }
         })
-        return reply.send({ ...route, stops: stopsWithOrders })
+
+        const allStopsPaid = stopsWithOrders.every((s) => s.paymentStatus === 'paid')
+
+        return reply.send({
+          ...route,
+          assignedDriver,
+          allStopsPaid,
+          stops: stopsWithOrders,
+        })
       }
     )
 
@@ -159,6 +203,26 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
       return reply.send({ id, status: 'pending' })
     })
 
+    instance.delete<{ Params: { id: string; stopId: string } }>(
+      '/api/v1/routes/:id/stops/:stopId',
+      async (request: AuthenticatedRequest, reply) => {
+        if (request.role !== 'admin' && request.role !== 'manager') {
+          return reply.code(403).send({ error: 'Admin or Manager only' })
+        }
+        const params = request.params as { id: string; stopId: string }
+        const route = await getRouteById(params.id)
+        if (!route) return reply.code(404).send({ error: 'Route not found' })
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== route.state_id) {
+          return reply.code(403).send({ error: 'Route not in scope' })
+        }
+        const result = await removeRouteStop(params.stopId)
+        if (!result.ok) return reply.code(400).send({ error: 'Stop not found or route completed' })
+        if (result.routeId !== params.id) return reply.code(400).send({ error: 'Stop does not belong to this route' })
+        return reply.send({ ok: true, orderId: result.orderId })
+      }
+    )
+
     instance.patch<{ Params: { id: string } }>(
       '/api/v1/override-requests/:id/approve',
       async (request: AuthenticatedRequest, reply) => {
@@ -208,6 +272,28 @@ export async function registerRoutesRoutes(app: FastifyInstance): Promise<void> 
         }
         const zips = await driversRepo.getDriverZips(driver.id)
         return reply.send({ ...driver, zips })
+      }
+    )
+
+    instance.patch<{ Params: { id: string }; Body: { active?: boolean; onHold?: boolean } }>(
+      '/api/v1/drivers/:id',
+      async (request: AuthenticatedRequest, reply) => {
+        const params = request.params as { id: string }
+        const body = request.body as { active?: boolean; onHold?: boolean }
+        const driver = await driversRepo.findDriverById(params.id)
+        if (!driver) return reply.code(404).send({ error: 'Driver not found' })
+        const scope = requireStateScope(request)
+        if (request.role !== 'admin' && scope !== driver.stateId) {
+          return reply.code(403).send({ error: 'State not in scope' })
+        }
+        const update: { active?: boolean; onHold?: boolean } = {}
+        if (typeof body.active === 'boolean') update.active = body.active
+        if (typeof body.onHold === 'boolean') update.onHold = body.onHold
+        if (Object.keys(update).length === 0) return reply.send({ ...driver })
+        const ok = await driversRepo.updateDriverStatus(params.id, update)
+        if (!ok) return reply.code(500).send({ error: 'Update failed' })
+        const updated = await driversRepo.findDriverById(params.id)
+        return reply.send(updated!)
       }
     )
 

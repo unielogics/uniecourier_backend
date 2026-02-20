@@ -77,6 +77,10 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
         email?: string
         phone?: string
       }
+      /** Intermediary ID (WMS) for billing reports and disputes */
+      intermediaryId?: string
+      /** Intermediary name for billing reports, disputes, and 4×6 label */
+      intermediaryName?: string
       /** Agreed rate in cents (from Kiosk rate-shopping). When provided, used instead of recalculating. */
       rateTotalCents?: number
       deadlineAt?: string
@@ -200,6 +204,8 @@ export async function registerWmsIntegrationRoutes(app: FastifyInstance): Promis
       billingCompany: body.billTo.company?.trim(),
       billingEmail: body.billTo.email?.trim(),
       billingPhone: body.billTo.phone?.trim(),
+      intermediaryId: body.intermediaryId?.trim() || undefined,
+      intermediaryName: body.intermediaryName?.trim() || undefined,
       sku: body.sku?.trim(),
       itemName: (body.itemTitle ?? body.itemName)?.trim(),
       image: body.image?.trim(),

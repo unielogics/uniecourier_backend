@@ -43,6 +43,16 @@ const OrderSchema = new Schema(
     billingCompany: String,
     billingEmail: String,
     billingPhone: String,
+    /** WMS intermediary ID for billing reports and disputes */
+    intermediaryId: String,
+    /** Intermediary name for billing reports, disputes, and 4×6 label */
+    intermediaryName: String,
+    /** Payment status — only paid orders are eligible for route builder */
+    paymentStatus: {
+      type: String,
+      enum: ['unpaid', 'paid'],
+      default: 'unpaid',
+    },
   },
   { timestamps: true, collection: 'orders' }
 )
